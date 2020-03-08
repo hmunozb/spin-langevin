@@ -10,13 +10,6 @@ use simd_phys::r3::{Matrix3d4xf64, Vector3d4xf64};
 use simd_phys::r3::cross_exponential_vector3d;
 use simd_phys::vf64::Aligned4xf64;
 
-//use simd_phys::aligned::Aligned4x64;
-
-pub type SpinVector3DAligned4xf64 =  Vector3d4xf64;
-//type SpinArray3DAligned4x64 = [Aligned4xf64; 3];
-
-//static ZERO_SPIN_ARRAY_3D: SpinArray3DAligned4x64 = [Aligned4xf64{dat: [0.0, 0.0, 0.0, 0.0]}; 3];
-
 #[derive(Copy, Clone)]
 pub enum StepResult{
     Accept(f64),
@@ -24,7 +17,7 @@ pub enum StepResult{
 }
 
 pub fn xyz_to_array_chunks(arr: ArrayView2<f64>,
-                           mut chunk_array: ArrayViewMut1<SpinVector3DAligned4xf64>) {
+                           mut chunk_array: ArrayViewMut1<Vector3d4xf64>) {
     let shape = arr.shape();
     if shape[1] != 3{
         panic!("xyz_to_array_chunks: 3 spatial dimensions required.");
@@ -63,8 +56,8 @@ pub fn xyz_to_array_chunks(arr: ArrayView2<f64>,
 ///
 /// The arrays are passed as arrays of 3_D x 4_vf64 chunks
 fn sl_add_dissipative(
-    h_array: &mut ArrayViewMut1<SpinVector3DAligned4xf64>,
-    m_array: & ArrayView1<SpinVector3DAligned4xf64>,
+    h_array: &mut ArrayViewMut1<Vector3d4xf64>,
+    m_array: & ArrayView1<Vector3d4xf64>,
     chi: f64
 ){
     let chi = Aligned4xf64::from(chi);
@@ -75,9 +68,9 @@ fn sl_add_dissipative(
 }
 
 fn sl_dissipative(
-    h_array: & ArrayViewMut1<SpinVector3DAligned4xf64>,
-    v_array: &mut ArrayViewMut1<SpinVector3DAligned4xf64>,
-    m_array: & ArrayView1<SpinVector3DAligned4xf64>,
+    h_array: & ArrayViewMut1<Vector3d4xf64>,
+    v_array: &mut ArrayViewMut1<Vector3d4xf64>,
+    m_array: & ArrayView1<Vector3d4xf64>,
     chi: f64
 ){
     let chi = Aligned4xf64::from(chi);
@@ -88,15 +81,15 @@ fn sl_dissipative(
 }
 
 pub struct SpinLangevinWorkpad{
-    pub m0: Array2<SpinVector3DAligned4xf64>,
-    pub h0: Array2<SpinVector3DAligned4xf64>,
-    pub h1: Array2<SpinVector3DAligned4xf64>,
-    pub h2: Array2<SpinVector3DAligned4xf64>,
-    pub m1: Array2<SpinVector3DAligned4xf64>,
-    pub omega1: Array2<SpinVector3DAligned4xf64>,
-    pub omega2: Array2<SpinVector3DAligned4xf64>,
-    pub chi1: Array2<SpinVector3DAligned4xf64>,
-    pub chi2: Array2<SpinVector3DAligned4xf64>
+    pub m0: Array2<Vector3d4xf64>,
+    pub h0: Array2<Vector3d4xf64>,
+    pub h1: Array2<Vector3d4xf64>,
+    pub h2: Array2<Vector3d4xf64>,
+    pub m1: Array2<Vector3d4xf64>,
+    pub omega1: Array2<Vector3d4xf64>,
+    pub omega2: Array2<Vector3d4xf64>,
+    pub chi1: Array2<Vector3d4xf64>,
+    pub chi2: Array2<Vector3d4xf64>
 
 }
 
@@ -127,7 +120,7 @@ impl SpinLangevinWorkpad{
 /// work: SpinLangevinWorkpad, arrays of instances x spins x (3D x 4) SIMD packets
 ///         i.e. a total of (4*instances) x spins  3D Euclidean vectors
 /// haml_update: Function pdate the local fields due to the spins at time t. Should read/modify
-///             an ArrayView1<SpinVector3DAligned4xf64>, where the array dimension is over spin indices
+///             an ArrayView1<Vector3d4xf64>, where the array dimension is over spin indices
 ///     NOTE: haml_update must write to all three cartesian components of each local field, even if
 ///         a component is zero. The fields are not reset in any way before each iteration.
 /// eta : Dissipation strength
@@ -166,7 +159,7 @@ impl SpinLangevinWorkpad{
 ///     Simulated Annealing. Phys. Rev. X 8, 031016 (2018).
 ///
 pub fn spin_langevin_step<Fh, R, Fr>(
-    m0: &Array2<SpinVector3DAligned4xf64>, mf: &mut Array2<SpinVector3DAligned4xf64>,
+    m0: &Array2<Vector3d4xf64>, mf: &mut Array2<Vector3d4xf64>,
     t0: f64, delta_t : f64,
     work :&mut SpinLangevinWorkpad,
     eta: f64, b: f64,
@@ -174,9 +167,9 @@ pub fn spin_langevin_step<Fh, R, Fr>(
     rng: &mut R,
     rand_xi_f: Fr,
 ) -> StepResult
-    where Fh: Fn(f64, &ArrayView1<SpinVector3DAligned4xf64>, &mut ArrayViewMut1<SpinVector3DAligned4xf64>) + Sync,
+    where Fh: Fn(f64, &ArrayView1<Vector3d4xf64>, &mut ArrayViewMut1<Vector3d4xf64>) + Sync,
           R: Rng + ?Sized,
-          Fr: Fn(&mut R) -> SpinVector3DAligned4xf64
+          Fr: Fn(&mut R) -> Vector3d4xf64
 {
     let h_shape = work.shape();
     let t1 = t0 + delta_t/2.0;
@@ -196,29 +189,23 @@ pub fn spin_langevin_step<Fh, R, Fr>(
         *chi2 = rand_xi_f(rng) * b_sqrt;
     }
     // Hamiltonian field update
-    let h_update = |t: f64, h: &mut Array2<SpinVector3DAligned4xf64>, m: & Array2<SpinVector3DAligned4xf64> |{
+    let h_update = |t: f64, h: &mut Array2<Vector3d4xf64>, m: & Array2<Vector3d4xf64> |{
         h.axis_iter_mut(Axis(0)).into_par_iter().zip(m.axis_iter(Axis(0)).into_par_iter())
             .for_each(|(mut h_row, m_row)|{
                 haml_fn(t, &m_row, &mut h_row);
                 sl_add_dissipative(&mut h_row, & m_row, eta);
             });
-//        for (mut h_row, m_row) in
-//                h.axis_iter_mut(Axis(0)).zip(m.axis_iter(Axis(0)))
-//        {
-//            haml_fn(t, &m_row, &mut h_row);
-//            sl_add_dissipative(&mut h_row, & m_row, eta);
-//        }
     };
-    let avg_field = |m: & Array2<SpinVector3DAligned4xf64>| -> f64{
-        let m_sum : f64 = m.iter().map(|v: &SpinVector3DAligned4xf64|
+    let avg_field = |m: & Array2<Vector3d4xf64>| -> f64{
+        let m_sum : f64 = m.iter().map(|v: &Vector3d4xf64|
             (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).map(f64::sqrt).mean_reduce())
             .sum() ;
         m_sum / (m.len() as f64)
 
     };
     // Spin propagation update
-    let m_update = |omega: &Array2<SpinVector3DAligned4xf64>, spins_t0: &Array2<SpinVector3DAligned4xf64>,
-                    spins_tf: &mut Array2<SpinVector3DAligned4xf64>|
+    let m_update = |omega: &Array2<Vector3d4xf64>, spins_t0: &Array2<Vector3d4xf64>,
+                    spins_tf: &mut Array2<Vector3d4xf64>|
         {
 
             ndarray::Zip::from(omega).and(spins_t0).and(spins_tf)
@@ -229,20 +216,8 @@ pub fn spin_langevin_step<Fh, R, Fr>(
                         let mut phi : Matrix3d4xf64 = Zero::zero();
                         cross_exponential_vector3d(om, &mut phi);
                         phi.mul_to(m0, mf);
-                        //let n_sq: Aligned4xf64 = mf.x*mf.x + mf.y*mf.y + mf.z*mf.z;
-                        //let n = n_sq.map(f64::sqrt);
-                        //*mf /= n;
                     }
                 );
-
-//        let mut phi : Matrix3d4xf64 = Zero::zero();
-//        for (om, m0, mf) in itertools::multizip((omega.iter(), spins_t0.iter(), spins_tf.iter_mut(),)){
-//            cross_exponential_vector3d(om, &mut phi);
-//            phi.mul_to(m0, mf);
-//            let n_sq: Aligned4xf64 = mf.x*mf.x + mf.y*mf.y + mf.z*mf.z;
-//            let n = n_sq.map(f64::sqrt);
-//            *mf /= n;
-//        }
         };
 
     //let m0 = &work.m0;
@@ -297,13 +272,6 @@ pub fn spin_langevin_step<Fh, R, Fr>(
         return StepResult::Reject(mean_o12);
     }
 
-//    for (h0, h1, h2, o2, chi1, chi2) in itertools::multizip(
-//            (haml_10.iter(), haml_11.iter(), haml_12.iter(), omega_12.iter_mut(), noise_1.iter(), noise_2.iter()))
-//    {
-//        *o2 = (h0 + h1 * Aligned4xf64::from(4.0) + h2) * (delta_t / 6.0)
-//            + (chi1 + chi2) * (delta_t/2.0).map(f64::sqrt);
-//    }
-
     let spins_t0 = m0;
     let spins_t = mf;
     let haml_20 = haml_10;
@@ -331,12 +299,6 @@ pub fn spin_langevin_step<Fh, R, Fr>(
                 + (chi1 + chi2) * (delta_t/2.0).map(f64::sqrt);
         });
 
-//    for (h0, h1, h2, o2, chi1, chi2) in itertools::multizip(
-//            (haml_20.iter(), haml_21.iter(), haml_22.iter(), omega2.iter_mut(), noise_1.iter(), noise_2.iter())){
-//        *o2 = (h0 + h1 * Aligned4xf64::from(4.0) + h2) * (delta_t / 6.0)
-//            + (chi1 + chi2) * (delta_t/2.0).map(f64::sqrt);
-//    }
-
     // Propagate m[0] to m[\delta_t]
     m_update(&*omega2, spins_t0, spins_t);
 
@@ -345,57 +307,12 @@ pub fn spin_langevin_step<Fh, R, Fr>(
 
 }
 
-//pub fn spin_langevin_me2(
-//    m0: ArrayView3<f64>,
-//
-//){
-//
-//}
-
-
-
-//fn spin_langevin_dmdt(
-//    hamiltonian_fields: &Array1<Aligned4xf64>,
-//    spin_trajectories: &Array2<Aligned4xf64>,
-//    dmdt_array: &mut Array2<Aligned4xf64>,
-//    chi: f64
-//)
-//{
-//    let h_shape = hamiltonian_fields.raw_dim();
-//    let spins_shape = spin_trajectories.raw_dim();
-//    let dm_shape = dmdt_array.raw_dim();
-//    if h_shape[0] != spins_shape[0]{
-//        panic!(format!("spin_langevin_dmdt: Dimension mismatch: h={:?} , m={:?} ", h_shape, spins_shape))
-//    }
-//
-//    if dm_shape != spins_shape{
-//        panic!(format!("spin_langevin_dmdt: Dimension mismatch: m={:?} , dm={:?} ", spins_shape, dm_shape))
-//    }
-//
-//    for ((spins, mut dmdt),
-//            h) in
-//            spin_trajectories.axis_iter(Axis(0))
-//                .zip(dmdt_array.axis_iter_mut(Axis(0)))
-//                .zip(hamiltonian_fields.iter()){
-//        for (si, dmi) in spins.iter().zip(dmdt.iter_mut()){
-//            let mut cross_field = Aligned4xf64::default();
-//            let mut triple_cross_field = Aligned4xf64::default();
-//            cross_product_aligned_4xf64(h, si, &mut cross_field);
-//            cross_product_aligned_4xf64(&cross_field, si, &mut triple_cross_field);
-//
-//            triple_cross_field *= chi;
-//            *dmi = cross_field + triple_cross_field;
-//            *dmi *= -1.0;
-//        }
-//    }
-//}
-
 #[cfg(test)]
 mod tests{
     use ndarray::{Array1, Array2};
     use num_traits::Zero;
 
-    use super::{sl_add_dissipative, spin_langevin_step, SpinVector3DAligned4xf64,
+    use super::{sl_add_dissipative, spin_langevin_step, Vector3d4xf64,
                                 xyz_to_array_chunks};
     use simd_phys::vf64::Aligned4xf64;
 
