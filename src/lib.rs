@@ -16,6 +16,15 @@ pub enum StepResult{
     Reject(f64)
 }
 
+impl StepResult{
+    pub fn into_result(self) -> Result<f64, f64>{
+        match self{
+            StepResult::Accept(x)=> Ok(x),
+            StepResult::Reject(x) => Err(x)
+        }
+    }
+}
+
 pub fn xyz_to_array_chunks(arr: ArrayView2<f64>,
                            mut chunk_array: ArrayViewMut1<Vector3d4xf64>) {
     let shape = arr.shape();
@@ -311,30 +320,43 @@ pub fn spin_langevin_step<Fh, R, Fr>(
 mod tests{
     use ndarray::{Array1, Array2};
     use num_traits::Zero;
+    use rand::prelude::*;
+    use rand_distr::StandardNormal;
 
-    use super::{sl_add_dissipative, spin_langevin_step, Vector3d4xf64,
-                                xyz_to_array_chunks};
+    use super::*;
     use simd_phys::vf64::Aligned4xf64;
 
     #[test]
     fn test_spin_langevin_dmdt(){
         let haml_arr = Array2::from_shape_vec((4,3),
-                                              vec![ 1.0, 0.0, 0.0,
-                                                    0.0, 1.0, 0.0,
-                                                    0.5, 0.5, 0.0,
-                                                    0.5, -0.5, 0.0]).unwrap();
+                                              vec![ 0.0, 0.0, 1.0,
+                                                    0.0, 0.0, 1.0,
+                                                    0.0, 0.0, 1.0,
+                                                    0.0, 0.0, 1.0]).unwrap();
         let mut haml = Array1::from_elem((1,), Zero::zero());
 
         xyz_to_array_chunks(haml_arr.view(), haml.view_mut());
         let spins_arr = Array2::from_shape_vec((4, 3),
-                                               vec![0.0, 0.0, 1.0,    0.0, 0.0, 1.0,    0.0, 0.0, 1.0,    0.0, 0.0, 1.0]
+                                               vec![0.0, 1.0, 0.0,    0.0, 1.0, 0.0,    0.0, 1.0, 0.0,    0.0, 1.0, 0.0]
         ).unwrap();
         let mut spins = Array1::from_elem((1,), Zero::zero());
         xyz_to_array_chunks(spins_arr.view(), spins.view_mut());
 
+        let spins = spins.broadcast((1, 1)).unwrap().into_owned();
+        let mut mf = spins.clone();
+        let mut work = SpinLangevinWorkpad::from_shape(1, 1);
+        let mut rng = thread_rng();
+        spin_langevin_step(&spins, &mut mf, 0.0, 0.1, &mut work, 1.0e-1, 0.0,
+                           |_t, arr, h| h.assign(&haml) ,
+                           &mut rng,|_r| Vector3::zeros()
+        )
+            .into_result()
+            .expect("spin_langevin_step failed");
+
+        println!("{}", &mf)
         //let mut dm = Array1::from_elem((1,), ZERO_SPIN_ARRAY_3D);
 
-        sl_add_dissipative(&mut haml.view_mut(), & spins.view(), 0.1);
+        //sl_add_dissipative(&mut haml.view_mut(), & spins.view(), 0.1);
     }
 
 }
