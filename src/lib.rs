@@ -45,9 +45,9 @@ pub fn xyz_to_array_chunks(arr: ArrayView2<f64>,
 }
 
 /// Evaluates v in the dynamical spin-langevin equation
-///  dm/dt = v \cross m
+///  dm/dt = g \cross m
 /// where
-///     v =  h - \chi (h \cross m) )
+///     g =  h - \chi (h \cross m) )
 /// Specifically, this function updates the hamiltonian field by adding the dissipative term
 ///     h -= \chi (h\cross m)
 ///
@@ -114,7 +114,7 @@ impl SpinLangevinWorkpad{
 /// Peform a step of the Spin-Langevin stochastic differential equation (Stratonovich form)
 /// using a 2nd order nonlinear Magnus propagator
 ///
-///      \dd M   =  ( H(M) + \eta H(M) \cross M ) \cross M  \dd t + \sqrt(b) \dd xi(t) \cross M
+///      \dd M   =  ( H(M) - \eta H(M) \cross M ) \cross M  \dd t + \sqrt(b) \dd xi(t) \cross M
 ///
 /// Parameters:
 /// work: SpinLangevinWorkpad, arrays of instances x spins x (3D x 4) SIMD packets
