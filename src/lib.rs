@@ -133,6 +133,100 @@ impl SpinLangevinWorkpad{
     }
 }
 
+fn h_update<Fh>(t: f64, eta:f64, haml_fn: &Fh, h: &mut Array2<Vector3d4xf64>, m: & Array2<Vector3d4xf64> )
+where Fh: Fn(f64, &ArrayView1<Vector3d4xf64>, &mut ArrayViewMut1<Vector3d4xf64>) + Sync,
+{
+    h.axis_iter_mut(Axis(0)).into_par_iter()
+        .zip(m.axis_iter(Axis(0)).into_par_iter())
+        .for_each(|(mut h_row, m_row)|{
+            haml_fn(t, &m_row, &mut h_row);
+            sl_add_dissipative(&mut h_row, & m_row, eta);
+    });
+}
+
+fn m_update(omega: &Array2<Vector3d4xf64>, spins_t0: &Array2<Vector3d4xf64>,
+            spins_tf: &mut Array2<Vector3d4xf64>)
+{
+    ndarray::Zip::from(omega).and(spins_t0).and(spins_tf)
+    .into_par_iter()
+    .for_each(
+        |(om, m0, mf)|{
+            let mut phi : Matrix3d4xf64 = Zero::zero();
+            cross_exponential_vector3d(om, &mut phi);
+            phi.mul_to(m0, mf);
+        }
+    );
+}
+fn avg_field(m: & Array2<Vector3d4xf64>) -> f64{
+    let m_sum : f64 = m.iter()
+        .map(|v: &Vector3d4xf64|
+                (v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
+                    .map(f64::sqrt).mean_reduce())
+                    .sum() ;
+    m_sum / (m.len() as f64)
+}
+
+pub fn spin_langevin_step_m1<Fh, R, Fr>(
+    m0: &Array2<Vector3d4xf64>, mf: &mut Array2<Vector3d4xf64>,
+    t0: f64, delta_t : f64,
+    work :&mut SpinLangevinWorkpad,
+    eta: f64, b: f64,
+    haml_fn: Fh,
+    rng: &mut R,
+    rand_xi_f: Fr,
+) -> StepResult
+where Fh: Fn(f64, &ArrayView1<Vector3d4xf64>, &mut ArrayViewMut1<Vector3d4xf64>) + Sync,
+      R: Rng + ?Sized,
+      Fr: Fn(&mut R) -> Vector3d4xf64
+{
+    let t1 = t0 + delta_t/2.0;
+    let t2 = t0 + delta_t;
+    let delta_t = Aligned4xf64::from(delta_t);
+
+    assert_eq!(m0.raw_dim(), work.h0.raw_dim());
+    assert_eq!(mf.raw_dim(), m0.raw_dim());
+    assert!(b >= 0.0, "Stochastic strength must be non-negative");
+
+    let b_sqrt = Aligned4xf64::from(b.sqrt());
+    // Populate random noise arrays
+    let noise_1 = &mut work.chi1;
+    for chi1 in noise_1.iter_mut(){
+        *chi1 = rand_xi_f(rng) * b_sqrt;
+    }
+    let h_update = |t: f64, h: &mut Array2<Vector3d4xf64>, m: & Array2<Vector3d4xf64> |{
+        h_update(t, eta, &haml_fn, h, m);
+    };
+
+    let haml_10 = &mut work.h0;
+    let haml_11 = &mut work.h1;
+    let haml_12 = &mut work.h2;
+    // Stage 1 Computation
+    h_update(t0, haml_10, m0);
+    h_update(t1, haml_11, m0);
+    h_update(t2, haml_12, m0);
+
+    let omega_12 = &mut work.omega2;
+    ndarray::Zip::from(haml_10.view()).and(haml_11.view()).and(haml_12.view()).and(omega_12.view_mut())
+        .and(noise_1.view()).into_par_iter()
+        .for_each(|(h0, h1, h2, o2, chi1)|{
+            *o2 = (h0 + h1 * Aligned4xf64::from(4.0) + h2) * (delta_t / 6.0)
+                + chi1 * (delta_t).map(f64::sqrt);
+        });
+
+    // Check that the norm of the first stage is not too large
+    // Otherwise, dissipative term can cause numerical instability
+    let mean_o12 = avg_field(&*omega_12);
+    if mean_o12 >= MAX_AVG_ANGULAR_FIELD {
+        return StepResult::Reject(mean_o12);
+    }
+
+    let spins_t0 = m0;
+    let spins_t = mf;
+
+    m_update(&*omega_12, spins_t0, spins_t);
+    return StepResult::Accept(mean_o12);
+
+}
 /// Peform a step of the Spin-Langevin stochastic differential equation (Stratonovich form)
 /// using a 2nd order nonlinear Magnus propagator
 ///
@@ -211,37 +305,18 @@ pub fn spin_langevin_step<Fh, R, Fr>(
         *chi1 = rand_xi_f(rng) * b_sqrt;
         *chi2 = rand_xi_f(rng) * b_sqrt;
     }
-    // Hamiltonian field update
     let h_update = |t: f64, h: &mut Array2<Vector3d4xf64>, m: & Array2<Vector3d4xf64> |{
-        h.axis_iter_mut(Axis(0)).into_par_iter().zip(m.axis_iter(Axis(0)).into_par_iter())
-            .for_each(|(mut h_row, m_row)|{
-                haml_fn(t, &m_row, &mut h_row);
-                sl_add_dissipative(&mut h_row, & m_row, eta);
-            });
+        h_update(t, eta, &haml_fn, h, m);
     };
-    let avg_field = |m: & Array2<Vector3d4xf64>| -> f64{
-        let m_sum : f64 = m.iter().map(|v: &Vector3d4xf64|
-            (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).map(f64::sqrt).mean_reduce())
-            .sum() ;
-        m_sum / (m.len() as f64)
 
-    };
-    // Spin propagation update
-    let m_update = |omega: &Array2<Vector3d4xf64>, spins_t0: &Array2<Vector3d4xf64>,
-                    spins_tf: &mut Array2<Vector3d4xf64>|
-        {
+    // let avg_field = |m: & Array2<Vector3d4xf64>| -> f64{
+    //     let m_sum : f64 = m.iter().map(|v: &Vector3d4xf64|
+    //         (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).map(f64::sqrt).mean_reduce())
+    //         .sum() ;
+    //     m_sum / (m.len() as f64)
+    //
+    // };
 
-            ndarray::Zip::from(omega).and(spins_t0).and(spins_tf)
-                .into_par_iter()
-                //.with_min_len(4*h_shape.0)
-                .for_each(
-                    |(om, m0, mf)|{
-                        let mut phi : Matrix3d4xf64 = Zero::zero();
-                        cross_exponential_vector3d(om, &mut phi);
-                        phi.mul_to(m0, mf);
-                    }
-                );
-        };
 
     //let m0 = &work.m0;
     let haml_10 = &mut work.h0;
