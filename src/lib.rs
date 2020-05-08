@@ -10,6 +10,9 @@ use simd_phys::r3::{Matrix3d4xf64, Vector3d4xf64};
 use simd_phys::r3::cross_exponential_vector3d;
 use simd_phys::vf64::Aligned4xf64;
 
+
+pub static MAX_AVG_ANGULAR_FIELD : f64 = std::f64::consts::PI;
+
 #[derive(Copy, Clone)]
 pub enum StepResult{
     Accept(f64),
@@ -277,7 +280,7 @@ pub fn spin_langevin_step<Fh, R, Fr>(
     // Check that the norm of the first stage is not too large
     // Otherwise, dissipative term can cause numerical instability
     let mean_o12 = avg_field(&*omega_12);
-    if mean_o12 >= 1.0 {
+    if mean_o12 >= MAX_AVG_ANGULAR_FIELD {
         return StepResult::Reject(mean_o12);
     }
 
