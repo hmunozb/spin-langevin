@@ -92,6 +92,16 @@ fn sl_dissipative(
     }
 }
 
+pub struct SpinLangevinOpts{
+    pub stage1_only: bool
+}
+
+impl Default for SpinLangevinOpts{
+    fn default() -> Self {
+        SpinLangevinOpts{stage1_only: false}
+    }
+}
+
 pub struct SpinLangevinWorkpad{
     pub m0: Array2<Vector3d4xf64>,
     pub h0: Array2<Vector3d4xf64>,
@@ -178,6 +188,7 @@ pub fn spin_langevin_step<Fh, R, Fr>(
     haml_fn: Fh,
     rng: &mut R,
     rand_xi_f: Fr,
+    opts: SpinLangevinOpts
 ) -> StepResult
     where Fh: Fn(f64, &ArrayView1<Vector3d4xf64>, &mut ArrayViewMut1<Vector3d4xf64>) + Sync,
           R: Rng + ?Sized,
@@ -242,8 +253,8 @@ pub fn spin_langevin_step<Fh, R, Fr>(
     // STAGE 1
     // m_10  =  m_0,
     // H_{10} = H(t_0, m0),     H_{11} = H(t_1, m0)     H_{12} = H(t_2, m0)
-    // \Omega_{11}  =  (\delta_t / 4) ( H_{10}  + H_{11} ) + b \sqrt{\delta_t/2} \chi_1
-    // \Omega_{12} = (\delta_t / 6) (H_{10} + 4 H_{11} + H_{12} + b \sqrt{\delta_t/2} (\chi_1 + \chi_2)
+    // \Omega_{11}  =  (\delta_t / 4) ( H_{10}  + H_{11} ) + \sqrt{\delta_t/2} \chi_1
+    // \Omega_{12} = (\delta_t / 6) (H_{10} + 4 H_{11} + H_{12} + \sqrt{\delta_t/2} (\chi_1 + \chi_2)
     //
     // STAGE 2
     // m_{20} = m0,    m_{21} = \exp{\Omega_{11}} m_0,    m_{22} = \exp{\Omega_{12}} m_0
@@ -289,6 +300,11 @@ pub fn spin_langevin_step<Fh, R, Fr>(
     let haml_20 = haml_10;
     let haml_21 = haml_11;
     let haml_22 = haml_12;
+
+    if opts.stage1_only{ // short circuit stage 2
+        m_update(&*omega_12, spins_t0, spins_t);
+        return StepResult::Accept(mean_o12);
+    }
 
     // Stage 2 computation
 
@@ -351,7 +367,7 @@ mod tests{
         let mut rng = thread_rng();
         spin_langevin_step(&spins, &mut mf, 0.0, 0.1, &mut work, 1.0e-1, 0.0,
                            |_t, arr, h| h.assign(&haml) ,
-                           &mut rng,|_r| Vector3::zeros()
+                           &mut rng,|_r| Vector3::zeros(), Default::default()
         )
             .into_result()
             .expect("spin_langevin_step failed");
