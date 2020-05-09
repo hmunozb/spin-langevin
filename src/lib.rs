@@ -232,6 +232,16 @@ fn m_update_f64(omega: &Array2<Vector3<f64>>, spins_t0: &Array2<Vector3<f64>>,
         );
 }
 
+fn avg_field_f64(m: & Array2<Vector3<f64>>) -> f64{
+    let m_sum : f64 = m.iter()
+        .map(|v: &Vector3<f64>|
+            (v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
+                .sqrt())
+        .sum() ;
+    m_sum / (m.len() as f64)
+}
+
+#[inline]
 fn avg_field(m: & Array2<Vector3d4xf64>) -> f64{
     let m_sum : f64 = m.iter()
         .map(|v: &Vector3d4xf64|
@@ -249,7 +259,7 @@ pub fn spin_langevin_step_m0<Fh, R, Fr>(
     haml_fn: Fh,
     rng: &mut R,
     rand_xi_f: Fr,
-)
+) -> StepResult
 where Fh: Fn(f64, &ArrayView1<Vector3<f64>>, &mut ArrayViewMut1<Vector3<f64>>) + Sync,
       R: Rng + ?Sized,
       Fr: Fn(&mut R) -> Vector3<f64>{
@@ -263,11 +273,7 @@ where Fh: Fn(f64, &ArrayView1<Vector3<f64>>, &mut ArrayViewMut1<Vector3<f64>>) +
 
     let b_sqrt = b.sqrt();
 
-    // Populate random noise arrays
-    let noise_1 = &mut work.chi1;
-    for chi1 in noise_1.iter_mut(){
-        *chi1 = rand_xi_f(rng) * b_sqrt * (delta_t).sqrt();
-    }
+
     let h_update = |t: f64, h: &mut Array2<Vector3<f64>>, m: & Array2<Vector3<f64>> |{
         h_update_f64(t, eta, &haml_fn, h, m);
     };
@@ -288,8 +294,18 @@ where Fh: Fn(f64, &ArrayView1<Vector3<f64>>, &mut ArrayViewMut1<Vector3<f64>>) +
             ;
         }
     );
+    let mean_o1 = avg_field_f64(&*omega_1);
+    if mean_o1 >= MAX_AVG_ANGULAR_FIELD {
+        return StepResult::Reject(mean_o1);
+    }
+
     m_update_f64(&*omega_1, m0, m1);
 
+    // Populate random noise arrays
+    let noise_1 = &mut work.chi1;
+    for chi1 in noise_1.iter_mut(){
+        *chi1 = rand_xi_f(rng) * b_sqrt * (delta_t).sqrt();
+    }
     // Apply random portion of the field
     m_update_f64(&*noise_1, &*m1, mf);
     // ndarray::Zip::from(noise_1.view())
@@ -301,6 +317,8 @@ where Fh: Fn(f64, &ArrayView1<Vector3<f64>>, &mut ArrayViewMut1<Vector3<f64>>) +
     //         ;
     //     }
     //     );
+
+    return StepResult::Accept(mean_o1);
 }
 
 pub fn spin_langevin_step_m1<Fh, R, Fr>(
@@ -616,7 +634,8 @@ mod tests{
                            |_t, arr, h|
                                h.assign(&haml) ,
                            &mut rng,|r| Vector3::from_fn(|_i, _j| r.sample(StandardNormal))
-        );
+        ).into_result()
+            .unwrap();
 
         println!("{}", &mf)
         //let mut dm = Array1::from_elem((1,), ZERO_SPIN_ARRAY_3D);
