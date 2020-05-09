@@ -118,7 +118,7 @@ pub struct SpinLangevinM0Workpad{
     pub h0: Array2<Vector3<f64>>,
     pub h1: Array2<Vector3<f64>>,
     // pub h2: Array2<Vector3d4xf64>,
-    // pub m1: Array2<Vector3d4xf64>,
+    pub m1: Array2<Vector3<f64>>,
     pub omega1: Array2<Vector3<f64>>,
     // pub omega2: Array2<Vector3d4xf64>,
     pub chi1: Array2<Vector3<f64>>,
@@ -131,6 +131,7 @@ impl SpinLangevinM0Workpad{
         Self{
             m0: Array2::from_elem(sh,Zero::zero()),
             h0: Array2::from_elem(sh, Zero::zero()), h1: Array2::from_elem(sh, Zero::zero()),
+            m1: Array2::from_elem(sh, Zero::zero()),
             omega1:  Array2::from_elem(sh,Zero::zero()),  chi1: Array2::from_elem(sh,Zero::zero()),
         }
     }
@@ -265,27 +266,41 @@ where Fh: Fn(f64, &ArrayView1<Vector3<f64>>, &mut ArrayViewMut1<Vector3<f64>>) +
     // Populate random noise arrays
     let noise_1 = &mut work.chi1;
     for chi1 in noise_1.iter_mut(){
-        *chi1 = rand_xi_f(rng) * b_sqrt;
+        *chi1 = rand_xi_f(rng) * b_sqrt * (delta_t).sqrt();
     }
     let h_update = |t: f64, h: &mut Array2<Vector3<f64>>, m: & Array2<Vector3<f64>> |{
         h_update_f64(t, eta, &haml_fn, h, m);
     };
     let haml_10 = &mut work.h0;
+    let m1 = &mut work.m1;
     let omega_1 = &mut work.omega1;
 
     h_update(t1, haml_10, m0);
 
+    // Apply deterministic portion of the field first (Hamiltonian + dissipation)
     ndarray::Zip::from(haml_10.view())
         .and(omega_1.view_mut())
-        .and(noise_1.view())
+        //.and(noise_1.view())
         //.into_par_iter()
         //.for_each( |(h0, o2, chi1)|{
-        .apply(|h0, o2, chi1|{
-            *o2 = h0  * delta_t
-                + chi1 * (delta_t).sqrt();
-        });
-    m_update_f64(&*omega_1, m0, mf);
+        .apply(|h0, o1|{
+            *o1 = h0  * delta_t
+            ;
+        }
+    );
+    m_update_f64(&*omega_1, m0, m1);
 
+    // Apply random portion of the field
+    m_update_f64(&*noise_1, &*m1, mf);
+    // ndarray::Zip::from(noise_1.view())
+    //     .and(omega_1.view_mut())
+    //     //.into_par_iter()
+    //     //.for_each( |(h0, o2, chi1)|{
+    //     .apply(|chi1, o1|{
+    //         *o1 = chi1 * (delta_t/2.0).sqrt()
+    //         ;
+    //     }
+    //     );
 }
 
 pub fn spin_langevin_step_m1<Fh, R, Fr>(
