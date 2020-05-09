@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use nalgebra::Vector3;
+use nalgebra::{Vector3, Matrix3};
 
 use ndarray::{Array2, ArrayView1, ArrayView2, ArrayView3, ArrayViewMut1, Axis};
 use ndarray::parallel::prelude::*;
@@ -79,6 +79,17 @@ fn sl_add_dissipative(
     }
 }
 
+fn sl_add_dissipative_f64(
+    h_array: &mut ArrayViewMut1<Vector3<f64>>,
+    m_array: & ArrayView1<Vector3<f64>>,
+    chi: f64
+){
+    for (m,h) in m_array.iter().zip(h_array.iter_mut()){
+        let dh = h.cross(m);
+        *h -= dh * chi;
+    }
+}
+
 fn sl_dissipative(
     h_array: & ArrayViewMut1<Vector3d4xf64>,
     v_array: &mut ArrayViewMut1<Vector3d4xf64>,
@@ -102,6 +113,35 @@ impl Default for SpinLangevinOpts{
     }
 }
 
+pub struct SpinLangevinM0Workpad{
+    pub m0: Array2<Vector3<f64>>,
+    pub h0: Array2<Vector3<f64>>,
+    pub h1: Array2<Vector3<f64>>,
+    // pub h2: Array2<Vector3d4xf64>,
+    // pub m1: Array2<Vector3d4xf64>,
+    pub omega1: Array2<Vector3<f64>>,
+    // pub omega2: Array2<Vector3d4xf64>,
+    pub chi1: Array2<Vector3<f64>>,
+   // pub chi2: Array2<Vector3d4xf64>
+}
+
+impl SpinLangevinM0Workpad{
+    pub fn from_shape(s0: usize, s1: usize) -> Self{
+        let sh = (s0, s1);
+        Self{
+            m0: Array2::from_elem(sh,Zero::zero()),
+            h0: Array2::from_elem(sh, Zero::zero()), h1: Array2::from_elem(sh, Zero::zero()),
+            omega1:  Array2::from_elem(sh,Zero::zero()),  chi1: Array2::from_elem(sh,Zero::zero()),
+        }
+    }
+
+    pub fn shape(&self) -> (usize, usize){
+        let sh = self.m0.shape();
+
+        (sh[0], sh[1])
+    }
+}
+
 pub struct SpinLangevinWorkpad{
     pub m0: Array2<Vector3d4xf64>,
     pub h0: Array2<Vector3d4xf64>,
@@ -112,7 +152,6 @@ pub struct SpinLangevinWorkpad{
     pub omega2: Array2<Vector3d4xf64>,
     pub chi1: Array2<Vector3d4xf64>,
     pub chi2: Array2<Vector3d4xf64>
-
 }
 
 impl SpinLangevinWorkpad{
@@ -144,6 +183,26 @@ where Fh: Fn(f64, &ArrayView1<Vector3d4xf64>, &mut ArrayViewMut1<Vector3d4xf64>)
     });
 }
 
+fn h_update_f64<Fh>(t: f64, eta: f64, haml_fn: &Fh, h: &mut Array2<Vector3<f64>>, m: & Array2<Vector3<f64>> )
+    where Fh: Fn(f64, &ArrayView1<Vector3<f64>>, &mut ArrayViewMut1<Vector3<f64>>) + Sync,
+{
+    ndarray::Zip::from(h.genrows_mut()).and( m.genrows())
+        .apply( |mut h_row, m_row| {
+                haml_fn(t, &m_row, &mut h_row);
+                sl_add_dissipative_f64( &mut h_row, &m_row, eta);
+            }
+        );
+    //
+    // h.axis_iter_mut(Axis(0)).into_par_iter()
+    //     .zip(m.axis_iter(Axis(0))
+    //         .into_par_iter())
+    //     .for_each(
+    //         |(mut h_row, m_row)|{
+    //         haml_fn(t, &m_row, &mut h_row);
+    //         sl_add_dissipative_f64(&mut h_row, & m_row, eta);
+    //     });
+}
+
 fn m_update(omega: &Array2<Vector3d4xf64>, spins_t0: &Array2<Vector3d4xf64>,
             spins_tf: &mut Array2<Vector3d4xf64>)
 {
@@ -157,6 +216,21 @@ fn m_update(omega: &Array2<Vector3d4xf64>, spins_t0: &Array2<Vector3d4xf64>,
         }
     );
 }
+
+fn m_update_f64(omega: &Array2<Vector3<f64>>, spins_t0: &Array2<Vector3<f64>>,
+            spins_tf: &mut Array2<Vector3<f64>>)
+{
+    ndarray::Zip::from(omega).and(spins_t0).and(spins_tf)
+        //.into_par_iter()
+        //.for_each(  |(om, m0, mf)|{
+        .apply( |om, m0, mf|{
+                let rot = nalgebra::Rotation3::new(om.clone());
+                let phi = rot.into_inner();
+                phi.mul_to(m0, mf);
+            }
+        );
+}
+
 fn avg_field(m: & Array2<Vector3d4xf64>) -> f64{
     let m_sum : f64 = m.iter()
         .map(|v: &Vector3d4xf64|
@@ -164,6 +238,54 @@ fn avg_field(m: & Array2<Vector3d4xf64>) -> f64{
                     .map(f64::sqrt).mean_reduce())
                     .sum() ;
     m_sum / (m.len() as f64)
+}
+
+pub fn spin_langevin_step_m0<Fh, R, Fr>(
+    m0: &Array2<Vector3<f64>>, mf: &mut Array2<Vector3<f64>>,
+    t0: f64, delta_t : f64,
+    work :&mut SpinLangevinM0Workpad,
+    eta: f64, b: f64,
+    haml_fn: Fh,
+    rng: &mut R,
+    rand_xi_f: Fr,
+)
+where Fh: Fn(f64, &ArrayView1<Vector3<f64>>, &mut ArrayViewMut1<Vector3<f64>>) + Sync,
+      R: Rng + ?Sized,
+      Fr: Fn(&mut R) -> Vector3<f64>{
+
+    let t1 = t0 + delta_t/2.0;
+    //let t2 = t0 + delta_t;
+
+    assert_eq!(m0.raw_dim(), work.h0.raw_dim());
+    assert_eq!(mf.raw_dim(), m0.raw_dim());
+    assert!(b >= 0.0, "Stochastic strength must be non-negative");
+
+    let b_sqrt = b.sqrt();
+
+    // Populate random noise arrays
+    let noise_1 = &mut work.chi1;
+    for chi1 in noise_1.iter_mut(){
+        *chi1 = rand_xi_f(rng) * b_sqrt;
+    }
+    let h_update = |t: f64, h: &mut Array2<Vector3<f64>>, m: & Array2<Vector3<f64>> |{
+        h_update_f64(t, eta, &haml_fn, h, m);
+    };
+    let haml_10 = &mut work.h0;
+    let omega_1 = &mut work.omega1;
+
+    h_update(t1, haml_10, m0);
+
+    ndarray::Zip::from(haml_10.view())
+        .and(omega_1.view_mut())
+        .and(noise_1.view())
+        //.into_par_iter()
+        //.for_each( |(h0, o2, chi1)|{
+        .apply(|h0, o2, chi1|{
+            *o2 = h0  * delta_t
+                + chi1 * (delta_t).sqrt();
+        });
+    m_update_f64(&*omega_1, m0, mf);
+
 }
 
 pub fn spin_langevin_step_m1<Fh, R, Fr>(
@@ -206,7 +328,8 @@ where Fh: Fn(f64, &ArrayView1<Vector3d4xf64>, &mut ArrayViewMut1<Vector3d4xf64>)
     h_update(t2, haml_12, m0);
 
     let omega_12 = &mut work.omega2;
-    ndarray::Zip::from(haml_10.view()).and(haml_11.view()).and(haml_12.view()).and(omega_12.view_mut())
+    ndarray::Zip::from(haml_10.view()).and(haml_11.view()).and(haml_12.view())
+        .and(omega_12.view_mut())
         .and(noise_1.view()).into_par_iter()
         .for_each(|(h0, h1, h2, o2, chi1)|{
             *o2 = (h0 + h1 * Aligned4xf64::from(4.0) + h2) * (delta_t / 6.0)
@@ -446,6 +569,39 @@ mod tests{
         )
             .into_result()
             .expect("spin_langevin_step failed");
+
+        println!("{}", &mf)
+        //let mut dm = Array1::from_elem((1,), ZERO_SPIN_ARRAY_3D);
+
+        //sl_add_dissipative(&mut haml.view_mut(), & spins.view(), 0.1);
+    }
+
+    #[test]
+    fn test_spin_langevin_f64_dmdt(){
+        let sx : Vector3<f64> = Vector3::new(1.0, 0.0, 0.0);
+        let sy : Vector3<f64> = Vector3::new(0.0, 1.0, 0.0);
+        let sz : Vector3<f64> = Vector3::new(0.0, 0.0, 1.0);
+        let num_spins = 1;
+        let num_reps = 4;
+        let sh = (num_reps, num_spins);
+
+        let haml = Array1::from_shape_vec(1,
+                                              vec![ sz.clone() ]).unwrap();
+
+        let spins = Array2::from_shape_vec(sh,
+                                               vec![sx.clone(),
+                                                       sy.clone(),
+                                                       sz.clone(),
+                                                       (sx.clone() + &sy)/2.0_f64.sqrt()]).unwrap();
+
+        let mut mf = spins.clone();
+        let mut work = SpinLangevinM0Workpad::from_shape(num_reps, num_spins);
+        let mut rng = thread_rng();
+        spin_langevin_step_m0(&spins, &mut mf, 0.0, 0.1, &mut work, 1.0e-1, 0.01,
+                           |_t, arr, h|
+                               h.assign(&haml) ,
+                           &mut rng,|r| Vector3::from_fn(|_i, _j| r.sample(StandardNormal))
+        );
 
         println!("{}", &mf)
         //let mut dm = Array1::from_elem((1,), ZERO_SPIN_ARRAY_3D);
