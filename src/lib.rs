@@ -104,12 +104,13 @@ fn sl_dissipative(
 }
 
 pub struct SpinLangevinOpts{
+    pub h_max: f64,
     pub stage1_only: bool
 }
 
 impl Default for SpinLangevinOpts{
     fn default() -> Self {
-        SpinLangevinOpts{stage1_only: false}
+        SpinLangevinOpts{h_max: 1.0, stage1_only: false}
     }
 }
 
@@ -259,6 +260,7 @@ pub fn spin_langevin_step_m0<Fh, R, Fr>(
     haml_fn: Fh,
     rng: &mut R,
     rand_xi_f: Fr,
+    h_max: f64,
 ) -> StepResult
 where Fh: Fn(f64, &ArrayView1<Vector3<f64>>, &mut ArrayViewMut1<Vector3<f64>>) + Sync,
       R: Rng + ?Sized,
@@ -295,7 +297,7 @@ where Fh: Fn(f64, &ArrayView1<Vector3<f64>>, &mut ArrayViewMut1<Vector3<f64>>) +
         }
     );
     let mean_o1 = avg_field_f64(&*omega_1);
-    if mean_o1 >= MAX_AVG_ANGULAR_FIELD {
+    if mean_o1 >= h_max {
         return StepResult::Reject(mean_o1);
     }
 
@@ -633,7 +635,8 @@ mod tests{
         spin_langevin_step_m0(&spins, &mut mf, 0.0, 0.1, &mut work, 1.0e-1, 0.01,
                            |_t, arr, h|
                                h.assign(&haml) ,
-                           &mut rng,|r| Vector3::from_fn(|_i, _j| r.sample(StandardNormal))
+                           &mut rng,|r| Vector3::from_fn(|_i, _j| r.sample(StandardNormal)),
+                        1.0
         ).into_result()
             .unwrap();
 
