@@ -9,6 +9,8 @@ use rayon::prelude::*;
 use simd_phys::r3::{Matrix3d4xf64, Vector3d4xf64};
 use simd_phys::r3::cross_exponential_vector3d;
 use simd_phys::vf64::Aligned4xf64;
+use std::sync::{Mutex, MutexGuard};
+use std::ops::DerefMut;
 
 
 pub static MAX_AVG_ANGULAR_FIELD : f64 = std::f64::consts::PI;
@@ -252,6 +254,29 @@ fn avg_field(m: & Array2<Vector3d4xf64>) -> f64{
     m_sum / (m.len() as f64)
 }
 
+
+fn par_rng_fn< R, Fr>(
+    noise_arr: &mut Array2<Vector3d4xf64>,
+    rng_arr: & Vec<Mutex<R>>,
+    b_sqrt: Aligned4xf64,
+    rand_xi_f: &Fr
+)
+where R: Rng + Send + Sync,
+      Fr: Fn(& mut R) -> Vector3d4xf64 + Send + Sync
+{
+    noise_arr.par_iter_mut().for_each(
+        |chi: &mut Vector3d4xf64|{
+            {
+                let i = rayon::current_thread_index().unwrap_or(0);
+                let mrng = &rng_arr[i];
+                let mut grng : MutexGuard<R> = mrng.try_lock().expect("par_rng_fn: unexpected mutex lock");
+                let rng: & mut R = grng.deref_mut();
+                *chi = rand_xi_f(rng) * b_sqrt;
+            }
+        }
+    );
+}
+
 pub fn spin_langevin_step_m0<Fh, R, Fr>(
     m0: &Array2<Vector3<f64>>, mf: &mut Array2<Vector3<f64>>,
     t0: f64, delta_t : f64,
@@ -432,19 +457,19 @@ where Fh: Fn(f64, &ArrayView1<Vector3d4xf64>, &mut ArrayViewMut1<Vector3d4xf64>)
 /// 2.  Albash, T. & Lidar, D. A. Demonstration of a Scaling Advantage for a Quantum Annealer over
 ///     Simulated Annealing. Phys. Rev. X 8, 031016 (2018).
 ///
-pub fn spin_langevin_step<Fh, R, Fr>(
+pub fn spin_langevin_step<'a, Fh, R, Fr>(
     m0: &Array2<Vector3d4xf64>, mf: &mut Array2<Vector3d4xf64>,
     t0: f64, delta_t : f64,
     work :&mut SpinLangevinWorkpad,
     eta: f64, b: f64,
     haml_fn: Fh,
-    rng: &mut R,
+    rng_arr: &'a Vec<Mutex<R>>,
     rand_xi_f: Fr,
     opts: SpinLangevinOpts
 ) -> StepResult
     where Fh: Fn(f64, &ArrayView1<Vector3d4xf64>, &mut ArrayViewMut1<Vector3d4xf64>) + Sync,
-          R: Rng + ?Sized,
-          Fr: Fn(&mut R) -> Vector3d4xf64
+          R: Rng + Send + Sync,
+          Fr: Fn(& mut R) -> Vector3d4xf64 + Send + Sync
 {
     let h_shape = work.shape();
     let t1 = t0 + delta_t/2.0;
@@ -454,15 +479,21 @@ pub fn spin_langevin_step<Fh, R, Fr>(
     assert_eq!(m0.raw_dim(), work.h0.raw_dim());
     assert_eq!(mf.raw_dim(), m0.raw_dim());
     assert!(b >= 0.0, "Stochastic strength must be non-negative");
+    let num_threads = rayon::current_num_threads();
+    let elms_per_thread = h_shape.0 * h_shape.1 / num_threads;
+    assert!(rng_arr.len() >= num_threads, "Insufficient number of RNGs for multithreading");
 
     let b_sqrt = Aligned4xf64::from(b.sqrt());
     // Populate random noise arrays
     let noise_1 = &mut work.chi1;
     let noise_2 = &mut work.chi2;
-    for (chi1, chi2) in itertools::zip(noise_1.iter_mut(), noise_2.iter_mut()){
-        *chi1 = rand_xi_f(rng) * b_sqrt;
-        *chi2 = rand_xi_f(rng) * b_sqrt;
-    }
+    //let rand_f = |rng: &'a mut R| rand_xi_f(rng) * b_sqrt;
+    par_rng_fn(noise_1, rng_arr, b_sqrt, &rand_xi_f);
+    par_rng_fn(noise_2, rng_arr, b_sqrt, &rand_xi_f);
+    // for (chi1, chi2) in itertools::zip(noise_1.iter_mut(), noise_2.iter_mut()){
+    //     *chi1 = rand_xi_f(rng) * b_sqrt;
+    //     *chi2 = rand_xi_f(rng) * b_sqrt;
+    // }
     let h_update = |t: f64, h: &mut Array2<Vector3d4xf64>, m: & Array2<Vector3d4xf64> |{
         h_update(t, eta, &haml_fn, h, m);
     };
@@ -574,12 +605,16 @@ mod tests{
     use num_traits::Zero;
     use rand::prelude::*;
     use rand_distr::StandardNormal;
+    use rand_xoshiro::Xoshiro256Plus;
 
     use super::*;
     use simd_phys::vf64::Aligned4xf64;
 
     #[test]
     fn test_spin_langevin_dmdt(){
+        let num_threads = rayon::current_num_threads();
+        println!("Number of rayon threads: {}", num_threads);
+
         let haml_arr = Array2::from_shape_vec((4,3),
                                               vec![ 0.0, 0.0, 1.0,
                                                     0.0, 0.0, 1.0,
@@ -597,10 +632,16 @@ mod tests{
         let spins = spins.broadcast((1, 1)).unwrap().into_owned();
         let mut mf = spins.clone();
         let mut work = SpinLangevinWorkpad::from_shape(1, 1);
-        let mut rng = thread_rng();
+        let mut rng = Xoshiro256Plus::from_entropy() ;
+
+        let mut rng_arr = Vec::new();
+        for _ in 0..num_threads{
+            rng.jump();
+            rng_arr.push(Mutex::new(rng.clone()));
+        }
         spin_langevin_step(&spins, &mut mf, 0.0, 0.1, &mut work, 1.0e-1, 0.0,
                            |_t, arr, h| h.assign(&haml) ,
-                           &mut rng,|_r| Vector3::zeros(), Default::default()
+                           & rng_arr,|_r| Vector3::zeros(), Default::default()
         )
             .into_result()
             .expect("spin_langevin_step failed");
