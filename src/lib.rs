@@ -110,7 +110,7 @@ pub struct SpinLangevinOpts{
 
 impl Default for SpinLangevinOpts{
     fn default() -> Self {
-        SpinLangevinOpts{h_max: 1.0, stage1_only: false}
+        SpinLangevinOpts{h_max: 0.2, stage1_only: false}
     }
 }
 
@@ -524,7 +524,7 @@ pub fn spin_langevin_step<Fh, R, Fr>(
     // Check that the norm of the first stage is not too large
     // Otherwise, dissipative term can cause numerical instability
     let mean_o12 = avg_field(&*omega_12);
-    if mean_o12 >= MAX_AVG_ANGULAR_FIELD {
+    if mean_o12 >= opts.h_max {
         return StepResult::Reject(mean_o12);
     }
 
